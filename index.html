@@ -16,39 +16,59 @@
   .card { background:#141414; border:1px solid #262626; border-radius:18px; padding:14px; margin-bottom:14px; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--acento); margin:0 0 10px; }
   #sigBox { position:relative; background:#fff; border-radius:12px; overflow:hidden; touch-action:none; }
-  #sig { display:block; width:100%; height:40vh; min-height:200px; touch-action:none; cursor:crosshair; }
-  .guia { position:absolute; left:8%; right:8%; bottom:22%; border-top:1px dashed #D5D5D5; pointer-events:none; }
+  #sig { display:block; width:100%; height:38vh; min-height:190px; touch-action:none; cursor:crosshair; }
   .fila { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
   button { font:inherit; font-weight:600; border-radius:12px; border:1px solid #333; background:#1D1D1D; color:#ECECEC;
            padding:12px 16px; flex:1 1 auto; min-height:46px; }
   button.primary { background:var(--acento); border-color:var(--acento); color:#0A0A0A; }
   button:disabled { opacity:.45; }
   .nota { font-size:12.5px; color:#8A8F98; margin-top:10px; }
+  .sep { display:flex; align-items:center; gap:10px; color:#6E6E6E; font-size:12px; margin:14px 0 8px; }
+  .sep::before, .sep::after { content:""; height:1px; background:#2A2A2A; flex:1; }
   input[type=file] { width:100%; font-size:13px; color:#CFCFCF; background:#1A1A1A; border:1px dashed #3A3A3A;
                      border-radius:12px; padding:12px; }
+  input[type=range] { width:100%; accent-color:var(--acento); margin-top:6px; }
   #prevWrap { position:relative; margin-top:12px; border-radius:10px; overflow:hidden; background:#fff; touch-action:none; }
   #prev { display:block; width:100%; }
   #sigOverlay { position:absolute; cursor:move; touch-action:none; }
-  .hint { font-size:12.5px; color:#9AA0A6; margin-top:8px; }
+  .hint { font-size:12.5px; color:#9AA0A6; margin:8px 0 0; }
   .ok { color:var(--acento); font-size:13px; margin-top:10px; }
+  .thumbBox { background:#fff; border-radius:10px; padding:8px; margin-top:10px; }
+  .thumbBox img { display:block; width:100%; max-height:120px; object-fit:contain; }
+  .oculto { display:none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Firmar documento</h1>
-  <p class="sub">Firma con el dedo y estampa tu firma en el PDF. Todo pasa en tu teléfono: el archivo no se sube a ningún servidor.</p>
+  <p class="sub">Firma con el dedo o sube una foto de tu firma, y estampa la firma en el PDF. Todo pasa en tu teléfono: el archivo no se sube a ningún servidor.</p>
 
   <div class="card">
     <h2>1 · Tu firma</h2>
-    <div id="sigBox">
-      <canvas id="sig"></canvas>
-      <div class="guia"></div>
+    <div id="dedo">
+      <div id="sigBox">
+        <canvas id="sig"></canvas>
+      </div>
+      <div class="fila">
+        <button id="btnUndo">Deshacer</button>
+        <button id="btnClear">Borrar todo</button>
+      </div>
+      <p class="nota">Traza despacio, con el dedo apoyado. Si te sale apurada, prueba con la opción de abajo.</p>
     </div>
-    <div class="fila">
-      <button id="btnUndo">Deshacer</button>
-      <button id="btnClear">Borrar todo</button>
+
+    <div class="sep">o</div>
+    <div>
+      <input type="file" id="imgFirma" accept="image/*">
+      <p class="nota">Sube una foto o captura de tu firma. Se le quita el fondo blanco sola.</p>
+      <div id="ajusteBox" class="oculto">
+        <div class="thumbBox"><img id="thumb" alt="firma cargada"></div>
+        <label class="nota" for="umbral">Quitar fondo — si queda gris, súbelo; si desaparecen trazos, bájalo.</label>
+        <input type="range" id="umbral" min="120" max="245" value="205">
+        <div class="fila">
+          <button id="btnVolverDedo">Volver a firmar con el dedo</button>
+        </div>
+      </div>
     </div>
-    <p class="nota">Firma como firmas siempre: nombre y apellido, sin salirte del recuadro.</p>
   </div>
 
   <div class="card">
@@ -80,11 +100,20 @@
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
 
-/* ───────────────── firma ───────────────── */
+/* ═════════════ 1 · firma ═════════════ */
 const c = document.getElementById('sig');
 const ctx = c.getContext('2d');
+const ok = document.getElementById('ok');
 let trazos = [], actual = null, dibujando = false, dpr = 1;
+let modo = 'dedo';                 // 'dedo' | 'imagen'
+let firmaLista = null;             // { url, ratio } de la imagen subida y ya procesada
+let imgOriginal = null;            // ImageBitmap de la imagen subida
 
+function estilo(g, ancho) {
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  g.strokeStyle = '#0b1020';
+  g.lineWidth = ancho;
+}
 function ajustar() {
   const r = c.getBoundingClientRect();
   dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -93,12 +122,8 @@ function ajustar() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   redibujar();
 }
-function estilo() {
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  ctx.strokeStyle = 'var(--tinta)'; ctx.strokeStyle = '#0b1020';
-  ctx.lineWidth = 2.4;
-}
-function segmento(g, p1, p2) {        // trazo suavizado, en el contexto que se le pase
+/* dibuja UN tramo, en el contexto que reciba (clave: sin repintar todo en cada movimiento) */
+function segmento(g, p1, p2) {
   const m1 = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
   const prev = p2.__prev || p1;
   g.beginPath();
@@ -107,116 +132,188 @@ function segmento(g, p1, p2) {        // trazo suavizado, en el contexto que se 
   g.stroke();
   p2.__prev = m1;
 }
-function redibujar() {
+function redibujar() {                       // solo al deshacer o al cambiar de tamaño
   ctx.clearRect(0, 0, c.width, c.height);
-  estilo();
+  estilo(ctx, 2.4);
   trazos.forEach(t => {
     t.forEach(p => delete p.__prev);
     for (let i = 1; i < t.length; i++) segmento(ctx, t[i - 1], t[i]);
-    if (t.length === 1) { ctx.beginPath(); ctx.arc(t[0].x, t[0].y, 1.2, 0, 7); ctx.fill(); }
+    if (t.length === 1) { ctx.beginPath(); ctx.arc(t[0].x, t[0].y, 1.3, 0, 7); ctx.fill(); }
   });
 }
 function pos(e) {
   const r = c.getBoundingClientRect();
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
 c.addEventListener('pointerdown', e => {
-  c.setPointerCapture(e.pointerId); dibujando = true;
-  actual = [pos(e)]; trazos.push(actual); redibujar();
+  if (modo !== 'dedo') return;
+  c.setPointerCapture(e.pointerId);
+  dibujando = true;
+  actual = [pos(e)];
+  trazos.push(actual);
+  estilo(ctx, 2.4);
+  const p = actual[0];
+  ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, 7); ctx.fill();
 });
 c.addEventListener('pointermove', e => {
-  if (!dibujando) return;
+  if (!dibujando || modo !== 'dedo') return;
   e.preventDefault();
-  actual.push(pos(e)); redibujar();
+  const p = pos(e);
+  const ult = actual[actual.length - 1];
+  if (dist(p, ult) < 1.1) return;            // ignora temblor y puntos repetidos
+  actual.push(p);
+  estilo(ctx, 2.4);
+  segmento(ctx, actual[actual.length - 2], p);  // solo el tramo nuevo
 });
-c.addEventListener('pointerup', () => { dibujando = false; actual = null; pngCache = null; });
-c.addEventListener('pointercancel', () => { dibujando = false; actual = null; pngCache = null; });
-document.getElementById('btnUndo').onclick = () => { trazos.pop(); pngCache = null; redibujar(); };
-document.getElementById('btnClear').onclick = () => { trazos = []; pngCache = null; redibujar(); };
+const terminar = () => { dibujando = false; actual = null; };
+c.addEventListener('pointerup', terminar);
+c.addEventListener('pointercancel', terminar);
+c.addEventListener('pointerleave', terminar);
+document.getElementById('btnUndo').onclick = () => { trazos.pop(); redibujar(); };
+document.getElementById('btnClear').onclick = () => { trazos = []; redibujar(); };
 window.addEventListener('resize', ajustar);
 ajustar();
 
-/* firma recortada a PNG, con margen y a 3x para que imprima nítida */
-let pngCache = null;
-function firmaPNG() {
-  if (pngCache) return pngCache;
-  const pts = trazos.flat();
+/* firma del dedo → PNG recortado y nítido (3x) */
+function firmaDeTrazos(puntos, escala, k) {
+  const pad = 6, pts = puntos.flat();
   if (!pts.length) return null;
-  const pad = 6;
   const x0 = Math.min(...pts.map(p => p.x)) - pad, x1 = Math.max(...pts.map(p => p.x)) + pad;
   const y0 = Math.min(...pts.map(p => p.y)) - pad, y1 = Math.max(...pts.map(p => p.y)) + pad;
-  const k = 3, out = document.createElement('canvas');
+  const out = document.createElement('canvas');
   out.width = Math.max(2, Math.round((x1 - x0) * k));
   out.height = Math.max(2, Math.round((y1 - y0) * k));
   const o = out.getContext('2d');
-  o.lineCap = 'round'; o.lineJoin = 'round'; o.strokeStyle = '#0b1020'; o.lineWidth = 2.4 * k;
-  o.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+  estilo(o, 2.4 * k * (escala || 1));
+  o.setTransform(k * (escala || 1), 0, 0, k * (escala || 1), -x0 * k * (escala || 1), -y0 * k * (escala || 1));
   trazos.forEach(t => {
     t.forEach(p => delete p.__prev);
     for (let i = 1; i < t.length; i++) segmento(o, t[i - 1], t[i]);
+    if (t.length === 1) { o.beginPath(); o.arc(t[0].x, t[0].y, 1.3, 0, 7); o.fill(); }
   });
-  pngCache = { url: out.toDataURL('image/png'), ratio: out.width / out.height };
-  return pngCache;
+  return { url: out.toDataURL('image/png'), ratio: out.width / out.height };
 }
 
-/* ───────────────── estampado ───────────────── */
-/* caja de la firma en fracciones de la página (A4 de la carta: la línea de firma está en y=594.7 desde arriba) */
-let caja = { fx: 0.1008, fy: 0.2945, fw: 0.3780, fh: 0.0428 };  // x, y(desde abajo), ancho, alto
-let pdfBytes = null, ratioFirma = 3.2;
+/* firma subida como imagen: papel blanco → transparente, trazo oscuro */
+async function procesarImagen(umbral) {
+  if (!imgOriginal) return null;
+  const k = Math.min(3, 1400 / imgOriginal.width);
+  const w = Math.round(imgOriginal.width * k), h = Math.round(imgOriginal.height * k);
+  const tmp = document.createElement('canvas');
+  tmp.width = w; tmp.height = h;
+  const t = tmp.getContext('2d');
+  t.drawImage(imgOriginal, 0, 0, w, h);
+  const data = t.getImageData(0, 0, w, h);
+  const px = data.data;
+  let x0 = w, y0 = h, x1 = 0, y1 = 0, hay = false;
+  for (let i = 0; i < px.length; i += 4) {
+    const lum = px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114;
+    if (lum >= umbral) { px[i + 3] = 0; continue; }          // fondo claro → transparente
+    px[i] = px[i + 1] = px[i + 2] = 16;                      // trazo → tinta oscura
+    px[i + 3] = Math.min(255, (umbral - lum) * 5 + 70);      // antialias suave
+    const p = i / 4, x = p % w, y = (p / w) | 0;
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+    hay = true;
+  }
+  if (!hay) return null;
+  t.putImageData(data, 0, 0);
+  const pad = 6;
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(w - 1, x1 + pad); y1 = Math.min(h - 1, y1 + pad);
+  const rec = document.createElement('canvas');
+  rec.width = x1 - x0 + 1; rec.height = y1 - y0 + 1;
+  rec.getContext('2d').drawImage(tmp, -x0, -y0);
+  return { url: rec.toDataURL('image/png'), ratio: rec.width / rec.height };
+}
+
+const elImg = document.getElementById('imgFirma');
+const ajusteBox = document.getElementById('ajusteBox');
+const thumb = document.getElementById('thumb');
+const umbral = document.getElementById('umbral');
+elImg.addEventListener('change', async () => {
+  const f = elImg.files[0];
+  if (!f) return;
+  try {
+    imgOriginal = await createImageBitmap(f);
+    modo = 'imagen';
+    document.getElementById('sigBox').classList.add('oculto');
+    document.getElementById('dedo').querySelectorAll('button').forEach(b => b.classList.add('oculto'));
+    ajusteBox.classList.remove('oculto');
+    await refrescar();
+  } catch (err) { ok.textContent = 'No pude leer esa imagen: ' + err.message; }
+});
+umbral.addEventListener('input', refrescar);
+async function refrescar() {
+  firmaLista = await procesarImagen(parseInt(umbral.value, 10));
+  if (!firmaLista) { ok.textContent = 'Con ese ajuste no queda firma visible: sube o baja el control.'; thumb.removeAttribute('src'); return; }
+  thumb.src = firmaLista.url;
+  ok.textContent = '';
+  if (pdfBytes) pintarOverlay();
+}
+document.getElementById('btnVolverDedo').onclick = () => {
+  modo = 'dedo'; firmaLista = null; imgOriginal = null;
+  ajusteBox.classList.add('oculto');
+  document.getElementById('sigBox').classList.remove('oculto');
+  document.getElementById('dedo').querySelectorAll('button').forEach(b => b.classList.remove('oculto'));
+  elImg.value = '';
+  redibujar();
+};
+/* la firma que se va a estampar, venga del dedo o de una imagen */
+function obtenerFirma() { return modo === 'imagen' ? firmaLista : firmaDeTrazos(trazos, 1, 3); }
+
+/* ═════════════ 2 · documento + estampado ═════════════ */
+let caja = { fx: 0.1008, fy: 0.2945, fw: 0.3780, fh: 0.0428 };
+let pdfBytes = null;
+let anchoPag = 595.304, altoPag = 841.89, escalaPrev = 1;
 
 const elPdf = document.getElementById('pdf');
 const btnPdf = document.getElementById('btnPdf');
-const btnPng = document.getElementById('btnPng');
-const ok = document.getElementById('ok');
 const prevWrap = document.getElementById('prevWrap');
 const prev = document.getElementById('prev');
 const overlay = document.getElementById('sigOverlay');
-let escalaPrev = 1, anchoPag = 595.304, altoPag = 841.89;
 
 elPdf.addEventListener('change', async () => {
   const f = elPdf.files[0];
   if (!f) return;
-  pdfBytes = await f.arrayBuffer();
-  pdfBytes = pdfBytes.slice(0);
-  const doc = await pdfjsLib.getDocument({ data: pdfBytes.slice(0) }).promise;
-  const page = await doc.getPage(1);
-  const base = page.getViewport({ scale: 1 });
-  anchoPag = base.width; altoPag = base.height;
-  /* el contenedor aún está oculto: mido el ancho del card descontando su padding */
-  const anchoDisp = Math.max(200, prevWrap.parentElement.clientWidth - 28);
-  escalaPrev = anchoDisp / anchoPag;
-  const vp = page.getViewport({ scale: escalaPrev });
-  prev.width = Math.round(vp.width); prev.height = Math.round(vp.height);
-  await page.render({ canvasContext: prev.getContext('2d'), viewport: vp }).promise;
-  prevWrap.hidden = false;
-  document.getElementById('dragHint').hidden = false;
-  btnPdf.disabled = false;
-  pintarOverlay();
+  try {
+    const buf = await f.arrayBuffer();
+    pdfBytes = buf.slice(0);
+    const doc = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+    const page = await doc.getPage(1);
+    const base = page.getViewport({ scale: 1 });
+    anchoPag = base.width; altoPag = base.height;
+    const anchoDisp = Math.max(200, prevWrap.parentElement.clientWidth - 28);
+    escalaPrev = anchoDisp / anchoPag;
+    const vp = page.getViewport({ scale: escalaPrev });
+    prev.width = Math.round(vp.width); prev.height = Math.round(vp.height);
+    await page.render({ canvasContext: prev.getContext('2d'), viewport: vp }).promise;
+    prevWrap.hidden = false;
+    document.getElementById('dragHint').hidden = false;
+    btnPdf.disabled = false;
+    pintarOverlay();
+  } catch (err) { ok.textContent = 'No pude abrir ese PDF: ' + err.message; }
 });
 
 function pintarOverlay() {
-  const png = firmaPNG();
-  if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
-  ratioFirma = png.ratio;
-  /* mantener proporción dentro de la caja */
-  let w = caja.fw * anchoPag, h = w / ratioFirma;
+  const firma = obtenerFirma();
+  if (!firma) { ok.textContent = 'Primero firma o sube tu firma.'; overlay.removeAttribute('src'); return; }
+  let w = caja.fw * anchoPag, h = w / firma.ratio;
   const hMax = caja.fh * altoPag;
-  if (h > hMax) { h = hMax; w = h * ratioFirma; }
-  overlay.src = png.url;
+  if (h > hMax) { h = hMax; w = h * firma.ratio; }
+  overlay.src = firma.url;
   overlay.style.left = (caja.fx * anchoPag * escalaPrev) + 'px';
   overlay.style.top = ((altoPag - caja.fy * altoPag - h) * escalaPrev) + 'px';
   overlay.style.width = (w * escalaPrev) + 'px';
   overlay.style.height = (h * escalaPrev) + 'px';
-  overlay.dataset.w = w; overlay.dataset.h = h;
   overlay.dataset.fx = caja.fx; overlay.dataset.fy = caja.fy;
 }
-overlay.addEventListener('load', () => {});
 
-/* arrastrar la firma sobre la vista previa */
 let drag = null;
 overlay.addEventListener('pointerdown', e => {
-  drag = { x: e.clientX, y: e.clientY,
-           fx: parseFloat(overlay.dataset.fx), fy: parseFloat(overlay.dataset.fy) };
+  drag = { x: e.clientX, y: e.clientY, fx: parseFloat(overlay.dataset.fx), fy: parseFloat(overlay.dataset.fy) };
   overlay.setPointerCapture(e.pointerId);
 });
 overlay.addEventListener('pointermove', e => {
@@ -228,40 +325,36 @@ overlay.addEventListener('pointermove', e => {
 });
 overlay.addEventListener('pointerup', () => { drag = null; });
 
-btnPng.onclick = () => {
-  const png = firmaPNG();
-  if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
-  descargar(dataURLtoBlob(png.url), 'firma.png');
-  ok.textContent = 'Firma descargada como PNG.';
-};
-
+/* ═════════════ 3 · descargas ═════════════ */
 btnPdf.onclick = async () => {
   try {
     ok.textContent = 'Preparando…';
-    const png = firmaPNG();
-    if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
+    const firma = obtenerFirma();
+    if (!firma) { ok.textContent = 'Primero firma o sube tu firma.'; return; }
     const { PDFDocument } = PDFLib;
     const doc = await PDFDocument.load(pdfBytes.slice(0));
     const page = doc.getPage(0);
-    const img = await doc.embedPng(png.url);
+    const img = await doc.embedPng(firma.url);
     const { width: PW, height: PH } = page.getSize();
-    let w = caja.fw * PW, h = w / png.ratio;
+    let w = caja.fw * PW, h = w / firma.ratio;
     const hMax = caja.fh * PH;
-    if (h > hMax) { h = hMax; w = h * png.ratio; }
+    if (h > hMax) { h = hMax; w = h * firma.ratio; }
     page.drawImage(img, { x: caja.fx * PW, y: caja.fy * PH, width: w, height: h });
     const bytes = await doc.save();
     const nombre = (elPdf.files[0].name || 'documento.pdf').replace(/\.pdf$/i, '') + '-firmado.pdf';
     descargar(new Blob([bytes], { type: 'application/pdf' }), nombre);
-    ok.textContent = 'Listo: carta firmada descargada.';
-  } catch (err) {
-    ok.textContent = 'No se pudo: ' + err.message;
-  }
+    ok.textContent = 'Listo: documento firmado descargado.';
+  } catch (err) { ok.textContent = 'No se pudo: ' + err.message; }
 };
-
+document.getElementById('btnPng').onclick = () => {
+  const firma = obtenerFirma();
+  if (!firma) { ok.textContent = 'Primero firma o sube tu firma.'; return; }
+  descargar(dataURLtoBlob(firma.url), 'firma.png');
+  ok.textContent = 'Firma descargada como PNG.';
+};
 function descargar(blob, nombre) {
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = nombre;
+  a.href = URL.createObjectURL(blob); a.download = nombre;
   document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
 }
