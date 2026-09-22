@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Firmar documento</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --acento:#B8E828; --tinta:#0b1020; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:#0A0A0A; color:#ECECEC;
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; line-height:1.45; }
+  .wrap { max-width:560px; margin:0 auto; padding:18px 16px 40px; }
+  h1 { font-size:22px; margin:6px 0 2px; letter-spacing:-.02em; }
+  .sub { color:#9AA0A6; font-size:13.5px; margin:0 0 18px; }
+  .card { background:#141414; border:1px solid #262626; border-radius:18px; padding:14px; margin-bottom:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--acento); margin:0 0 10px; }
+  #sigBox { position:relative; background:#fff; border-radius:12px; overflow:hidden; touch-action:none; }
+  #sig { display:block; width:100%; height:40vh; min-height:200px; touch-action:none; cursor:crosshair; }
+  .guia { position:absolute; left:8%; right:8%; bottom:22%; border-top:1px dashed #D5D5D5; pointer-events:none; }
+  .fila { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  button { font:inherit; font-weight:600; border-radius:12px; border:1px solid #333; background:#1D1D1D; color:#ECECEC;
+           padding:12px 16px; flex:1 1 auto; min-height:46px; }
+  button.primary { background:var(--acento); border-color:var(--acento); color:#0A0A0A; }
+  button:disabled { opacity:.45; }
+  .nota { font-size:12.5px; color:#8A8F98; margin-top:10px; }
+  input[type=file] { width:100%; font-size:13px; color:#CFCFCF; background:#1A1A1A; border:1px dashed #3A3A3A;
+                     border-radius:12px; padding:12px; }
+  #prevWrap { position:relative; margin-top:12px; border-radius:10px; overflow:hidden; background:#fff; touch-action:none; }
+  #prev { display:block; width:100%; }
+  #sigOverlay { position:absolute; cursor:move; touch-action:none; }
+  .hint { font-size:12.5px; color:#9AA0A6; margin-top:8px; }
+  .ok { color:var(--acento); font-size:13px; margin-top:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Firmar documento</h1>
+  <p class="sub">Firma con el dedo y estampa tu firma en el PDF. Todo pasa en tu teléfono: el archivo no se sube a ningún servidor.</p>
+
+  <div class="card">
+    <h2>1 · Tu firma</h2>
+    <div id="sigBox">
+      <canvas id="sig"></canvas>
+      <div class="guia"></div>
+    </div>
+    <div class="fila">
+      <button id="btnUndo">Deshacer</button>
+      <button id="btnClear">Borrar todo</button>
+    </div>
+    <p class="nota">Firma como firmas siempre: nombre y apellido, sin salirte del recuadro.</p>
+  </div>
+
+  <div class="card">
+    <h2>2 · El documento</h2>
+    <input type="file" id="pdf" accept="application/pdf">
+    <p class="hint">Sube el PDF de la carta (no la foto, el PDF).</p>
+    <div id="prevWrap" hidden>
+      <canvas id="prev"></canvas>
+      <img id="sigOverlay" alt="firma">
+    </div>
+    <p class="hint" id="dragHint" hidden>Arrastra tu firma con el dedo hasta dejarla sobre la línea.</p>
+  </div>
+
+  <div class="card">
+    <h2>3 · Descargar</h2>
+    <div class="fila">
+      <button class="primary" id="btnPdf" disabled>Descargar carta firmada</button>
+    </div>
+    <div class="fila">
+      <button id="btnPng">Solo la firma (PNG)</button>
+    </div>
+    <p class="ok" id="ok"></p>
+    <p class="nota">Si algo sale mal, manda la firma en PNG y se estampa desde acá.</p>
+  </div>
+</div>
+
+<script src="vendor/pdf-lib.min.js"></script>
+<script src="vendor/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+
+/* ───────────────── firma ───────────────── */
+const c = document.getElementById('sig');
+const ctx = c.getContext('2d');
+let trazos = [], actual = null, dibujando = false, dpr = 1;
+
+function ajustar() {
+  const r = c.getBoundingClientRect();
+  dpr = Math.max(1, window.devicePixelRatio || 1);
+  c.width = Math.round(r.width * dpr);
+  c.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redibujar();
+}
+function estilo() {
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'var(--tinta)'; ctx.strokeStyle = '#0b1020';
+  ctx.lineWidth = 2.4;
+}
+function segmento(g, p1, p2) {        // trazo suavizado, en el contexto que se le pase
+  const m1 = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+  const prev = p2.__prev || p1;
+  g.beginPath();
+  g.moveTo(prev.x, prev.y);
+  g.quadraticCurveTo(p1.x, p1.y, m1.x, m1.y);
+  g.stroke();
+  p2.__prev = m1;
+}
+function redibujar() {
+  ctx.clearRect(0, 0, c.width, c.height);
+  estilo();
+  trazos.forEach(t => {
+    t.forEach(p => delete p.__prev);
+    for (let i = 1; i < t.length; i++) segmento(ctx, t[i - 1], t[i]);
+    if (t.length === 1) { ctx.beginPath(); ctx.arc(t[0].x, t[0].y, 1.2, 0, 7); ctx.fill(); }
+  });
+}
+function pos(e) {
+  const r = c.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+c.addEventListener('pointerdown', e => {
+  c.setPointerCapture(e.pointerId); dibujando = true;
+  actual = [pos(e)]; trazos.push(actual); redibujar();
+});
+c.addEventListener('pointermove', e => {
+  if (!dibujando) return;
+  e.preventDefault();
+  actual.push(pos(e)); redibujar();
+});
+c.addEventListener('pointerup', () => { dibujando = false; actual = null; pngCache = null; });
+c.addEventListener('pointercancel', () => { dibujando = false; actual = null; pngCache = null; });
+document.getElementById('btnUndo').onclick = () => { trazos.pop(); pngCache = null; redibujar(); };
+document.getElementById('btnClear').onclick = () => { trazos = []; pngCache = null; redibujar(); };
+window.addEventListener('resize', ajustar);
+ajustar();
+
+/* firma recortada a PNG, con margen y a 3x para que imprima nítida */
+let pngCache = null;
+function firmaPNG() {
+  if (pngCache) return pngCache;
+  const pts = trazos.flat();
+  if (!pts.length) return null;
+  const pad = 6;
+  const x0 = Math.min(...pts.map(p => p.x)) - pad, x1 = Math.max(...pts.map(p => p.x)) + pad;
+  const y0 = Math.min(...pts.map(p => p.y)) - pad, y1 = Math.max(...pts.map(p => p.y)) + pad;
+  const k = 3, out = document.createElement('canvas');
+  out.width = Math.max(2, Math.round((x1 - x0) * k));
+  out.height = Math.max(2, Math.round((y1 - y0) * k));
+  const o = out.getContext('2d');
+  o.lineCap = 'round'; o.lineJoin = 'round'; o.strokeStyle = '#0b1020'; o.lineWidth = 2.4 * k;
+  o.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+  trazos.forEach(t => {
+    t.forEach(p => delete p.__prev);
+    for (let i = 1; i < t.length; i++) segmento(o, t[i - 1], t[i]);
+  });
+  pngCache = { url: out.toDataURL('image/png'), ratio: out.width / out.height };
+  return pngCache;
+}
+
+/* ───────────────── estampado ───────────────── */
+/* caja de la firma en fracciones de la página (A4 de la carta: la línea de firma está en y=594.7 desde arriba) */
+let caja = { fx: 0.1008, fy: 0.2945, fw: 0.3780, fh: 0.0428 };  // x, y(desde abajo), ancho, alto
+let pdfBytes = null, ratioFirma = 3.2;
+
+const elPdf = document.getElementById('pdf');
+const btnPdf = document.getElementById('btnPdf');
+const btnPng = document.getElementById('btnPng');
+const ok = document.getElementById('ok');
+const prevWrap = document.getElementById('prevWrap');
+const prev = document.getElementById('prev');
+const overlay = document.getElementById('sigOverlay');
+let escalaPrev = 1, anchoPag = 595.304, altoPag = 841.89;
+
+elPdf.addEventListener('change', async () => {
+  const f = elPdf.files[0];
+  if (!f) return;
+  pdfBytes = await f.arrayBuffer();
+  pdfBytes = pdfBytes.slice(0);
+  const doc = await pdfjsLib.getDocument({ data: pdfBytes.slice(0) }).promise;
+  const page = await doc.getPage(1);
+  const base = page.getViewport({ scale: 1 });
+  anchoPag = base.width; altoPag = base.height;
+  /* el contenedor aún está oculto: mido el ancho del card descontando su padding */
+  const anchoDisp = Math.max(200, prevWrap.parentElement.clientWidth - 28);
+  escalaPrev = anchoDisp / anchoPag;
+  const vp = page.getViewport({ scale: escalaPrev });
+  prev.width = Math.round(vp.width); prev.height = Math.round(vp.height);
+  await page.render({ canvasContext: prev.getContext('2d'), viewport: vp }).promise;
+  prevWrap.hidden = false;
+  document.getElementById('dragHint').hidden = false;
+  btnPdf.disabled = false;
+  pintarOverlay();
+});
+
+function pintarOverlay() {
+  const png = firmaPNG();
+  if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
+  ratioFirma = png.ratio;
+  /* mantener proporción dentro de la caja */
+  let w = caja.fw * anchoPag, h = w / ratioFirma;
+  const hMax = caja.fh * altoPag;
+  if (h > hMax) { h = hMax; w = h * ratioFirma; }
+  overlay.src = png.url;
+  overlay.style.left = (caja.fx * anchoPag * escalaPrev) + 'px';
+  overlay.style.top = ((altoPag - caja.fy * altoPag - h) * escalaPrev) + 'px';
+  overlay.style.width = (w * escalaPrev) + 'px';
+  overlay.style.height = (h * escalaPrev) + 'px';
+  overlay.dataset.w = w; overlay.dataset.h = h;
+  overlay.dataset.fx = caja.fx; overlay.dataset.fy = caja.fy;
+}
+overlay.addEventListener('load', () => {});
+
+/* arrastrar la firma sobre la vista previa */
+let drag = null;
+overlay.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY,
+           fx: parseFloat(overlay.dataset.fx), fy: parseFloat(overlay.dataset.fy) };
+  overlay.setPointerCapture(e.pointerId);
+});
+overlay.addEventListener('pointermove', e => {
+  if (!drag) return;
+  e.preventDefault();
+  caja.fx = drag.fx + (e.clientX - drag.x) / (escalaPrev * anchoPag);
+  caja.fy = drag.fy - (e.clientY - drag.y) / (escalaPrev * altoPag);
+  pintarOverlay();
+});
+overlay.addEventListener('pointerup', () => { drag = null; });
+
+btnPng.onclick = () => {
+  const png = firmaPNG();
+  if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
+  descargar(dataURLtoBlob(png.url), 'firma.png');
+  ok.textContent = 'Firma descargada como PNG.';
+};
+
+btnPdf.onclick = async () => {
+  try {
+    ok.textContent = 'Preparando…';
+    const png = firmaPNG();
+    if (!png) { ok.textContent = 'Primero firma en el recuadro de arriba.'; return; }
+    const { PDFDocument } = PDFLib;
+    const doc = await PDFDocument.load(pdfBytes.slice(0));
+    const page = doc.getPage(0);
+    const img = await doc.embedPng(png.url);
+    const { width: PW, height: PH } = page.getSize();
+    let w = caja.fw * PW, h = w / png.ratio;
+    const hMax = caja.fh * PH;
+    if (h > hMax) { h = hMax; w = h * png.ratio; }
+    page.drawImage(img, { x: caja.fx * PW, y: caja.fy * PH, width: w, height: h });
+    const bytes = await doc.save();
+    const nombre = (elPdf.files[0].name || 'documento.pdf').replace(/\.pdf$/i, '') + '-firmado.pdf';
+    descargar(new Blob([bytes], { type: 'application/pdf' }), nombre);
+    ok.textContent = 'Listo: carta firmada descargada.';
+  } catch (err) {
+    ok.textContent = 'No se pudo: ' + err.message;
+  }
+};
+
+function descargar(blob, nombre) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = nombre;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+}
+function dataURLtoBlob(u) {
+  const [meta, b64] = u.split(',');
+  const bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: meta.match(/:(.*?);/)[1] });
+}
+</script>
+</body>
+</html>
